@@ -13,17 +13,27 @@ public class RecognitionConfig {
     public static final String DB_DIR = System.getProperty("user.dir") + "/data/db/";
     public static final long FILE_VALID_DURATION = 30 * 60 * 1000L;
     public static final String REMOTE_DB_PATH = "/opt/data/record/recog_logging.db";
-
     /**
-     * 获取目录下最新的 .db 文件
+     * 获取目录下所有的 .db 文件
      */
-    public static File getLatestDbFile() {
+    public static File[] getAllDbFile() {
         File dbDir = new File(RecognitionConfig.DB_DIR);
         if (!dbDir.exists()) {
             return null;
         }
 
         File[] dbFiles = dbDir.listFiles((dir, name) -> name.endsWith(".db"));
+        if (dbFiles == null || dbFiles.length == 0) {
+            return null;
+        }
+
+        return dbFiles;
+    }
+    /**
+     * 获取目录下最新的 .db 文件
+     */
+    public static File getLatestDbFile() {
+        File[] dbFiles = getAllDbFile();
         if (dbFiles == null || dbFiles.length == 0) {
             return null;
         }
@@ -37,16 +47,10 @@ public class RecognitionConfig {
      * 清理所有旧的数据库文件（下载新文件前调用）
      */
     public static int cleanOldDbFiles() {
-        File dbDir = new File(RecognitionConfig.DB_DIR);
-        if (!dbDir.exists()) {
+        File[] dbFiles = getAllDbFile();
+        if (dbFiles == null || dbFiles.length == 0) {
             return 0;
         }
-
-        File[] dbFiles = dbDir.listFiles((dir, name) -> name.endsWith(".db"));
-        if (dbFiles == null) {
-            return 0;
-        }
-
         int deletedCount = 0;
         for (File file : dbFiles) {
             if (file.delete()) {

@@ -8,6 +8,11 @@ import com.cscec.dumu.util.DateTimeRangePicker;
 import com.cscec.dumu.util.RecognitionConfig;
 import com.cscec.dumu.util.SQLiteReader;
 import com.cscec.dumu.util.TimestampFormatter;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
@@ -24,10 +29,12 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.text.SimpleDateFormat;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.*;
 import java.util.prefs.Preferences;
+import java.util.stream.Collectors;
 
 /**
  * 度目app
@@ -1152,6 +1159,16 @@ public class DumuSwingApp extends JFrame {
 
         searchPanel.add(searchRecordBtn);
 
+        searchPanel.add(new JLabel("时间YYYY-MM-DD:"));
+        JTextField timestampField = new JTextField(12);
+        timestampField.setText(LocalDate.now().minusDays(1).toString());
+        timestampField.setToolTipText("请输入时间，默认取输入时间后的数据");
+        searchPanel.add(timestampField);
+
+        JButton oneKeyExportBtn = new JButton("一键识别导出");
+        oneKeyExportBtn.addActionListener(e -> oneKeyExport(timestampField.getText().trim()));
+        searchPanel.add(oneKeyExportBtn);
+
         panel.add(searchPanel, BorderLayout.NORTH);
 
         // 识别记录表格
@@ -1281,6 +1298,157 @@ public class DumuSwingApp extends JFrame {
         }
     }
 
+    /**
+     * 一键识别导出 - 根据时间戳过滤所有.db文件中的记录，导出到Excel
+     */
+    private void oneKeyExport(String timestampStr) {
+        // 验证时间戳
+        if (timestampStr == null || timestampStr.isEmpty()) {
+            appendResult("请输入时间");
+            return;
+        }
+
+        long timestamp;
+        try {
+            timestamp = TimestampFormatter.parseTimeString(timestampStr);
+        } catch (NumberFormatException e) {
+            appendResult("时间格式错误，请检查");
+            return;
+        }
+
+        final long filterTimestamp = timestamp;
+
+        SwingWorker<Void, String> worker = new SwingWorker<Void, String>() {
+            @Override
+            protected Void doInBackground() throws Exception {
+                publish("========== 开始一键识别导出 ==========");
+                publish("筛选条件: ts >= " + filterTimestamp + " 且 pass_status = 1");
+
+                // 2. 创建临时目录
+                String tempPath = System.getProperty("java.io.tmpdir") + "/dumu_export/";
+                File tempDir = new File(tempPath);
+                if (!tempDir.exists()) {
+                    tempDir.mkdirs();
+                }
+
+                // 3. 查找设备上所有的 .db 文件
+                publish("正在查找设备上的数据库文件...");
+                File[] dbFiles = RecognitionConfig.getAllDbFile();
+                if (dbFiles == null || dbFiles.length == 0) {
+                    publish("未找到任何 .db 文件");
+                    return null;
+                }
+                List<String> fileNames = Arrays.stream(dbFiles)
+                        .map(File::getName)
+                        .collect(Collectors.toList());
+                publish("找到 " + dbFiles.length + " 个数据库文件: " + String.join(", ", fileNames));
+
+                // 4. 遍历每个 .db 文件，查询符合条件的记录
+                List<RecognitionRecord> allRecords = new ArrayList<>();
+                int fileIndex = 0;
+                for (File localDbFile : dbFiles) {
+
+                    List<RecognitionRecord> fileRecords = sqliteReader.queryRecognitionRecords(localDbFile.getPath(), "", filterTimestamp, Integer.MAX_VALUE);
+                    fileIndex++;
+                    publish(String.format("正在处理 [%d/%d]: %s", fileIndex, dbFiles.length, localDbFile.getName()));
+                    // 查询该数据库文件
+                    publish(String.format("从 %s 中查到 %d 条记录",
+                            localDbFile.getName(), fileRecords.size()));
+                    allRecords.addAll(fileRecords);
+                }
+
+                publish("共查询到 " + allRecords.size() + " 条符合条件的记录");
+
+                if (allRecords.isEmpty()) {
+                    publish("没有找到符合条件的记录");
+                    return null;
+                }
+
+                // 5. 导出到 Excel
+                String exportPath = exportToExcel(allRecords, timestampStr, filterTimestamp);
+                publish("导出成功！文件保存路径: " + exportPath);
+
+                publish("========== 一键识别导出完成 ==========");
+                return null;
+            }
+
+            @Override
+            protected void process(java.util.List<String> chunks) {
+                for (String msg : chunks) {
+                    appendResult(msg);
+                }
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    get();
+                } catch (Exception e) {
+                    appendResult("一键识别导出失败: " + e.getMessage());
+                    e.printStackTrace();
+                }
+            }
+        };
+        worker.execute();
+    }
+
+    /**
+     * 导出记录到 Excel 文件
+     */
+    private String exportToExcel(List<RecognitionRecord> records, String timestampStr, long filterTimestamp) throws Exception {
+        // 使用 Apache POI 创建 Excel
+        Workbook workbook = new XSSFWorkbook();
+        Sheet sheet = workbook.createSheet("识别记录");
+
+        // 创建标题行
+        Row headerRow = sheet.createRow(0);
+        String[] headers = {"序号", "时间戳", "姓名", "识别时间"};
+        for (int i = 0; i < headers.length; i++) {
+            Cell cell = headerRow.createCell(i);
+            cell.setCellValue(headers[i]);
+        }
+
+        // 填充数据
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        sdf.setTimeZone(TimeZone.getTimeZone("Asia/Shanghai"));
+
+        int rowNum = 1;
+        for (RecognitionRecord record : records) {
+            Row row = sheet.createRow(rowNum);
+            row.createCell(0).setCellValue(rowNum);
+            row.createCell(1).setCellValue(record.getTimestamp());
+            row.createCell(2).setCellValue(record.getUserName() != null ? record.getUserName() : "");
+            String dateTime = sdf.format(new Date(record.getTimestamp() * 1000));
+            row.createCell(3).setCellValue(dateTime);
+            rowNum++;
+        }
+
+        // 自动调整列宽
+        for (int i = 0; i < headers.length; i++) {
+            sheet.autoSizeColumn(i);
+        }
+        // 生成文件名
+        String baseFileName = String.format("识别记录导出_%d_%s", filterTimestamp, timestampStr);
+        String extension = ".xlsx";
+
+        File exportFile = new File(RecognitionConfig.DB_DIR + baseFileName + extension);
+        int counter = 1;
+
+        // 如果文件已存在，添加序号
+        while (exportFile.exists()) {
+            String newFileName = String.format("%s_%d%s", baseFileName, counter, extension);
+            exportFile = new File(RecognitionConfig.DB_DIR + newFileName);
+            counter++;
+        }
+        // 写入文件
+        try (FileOutputStream fos = new FileOutputStream(exportFile)) {
+            workbook.write(fos);
+        }
+        workbook.close();
+
+        return exportFile.getAbsolutePath();
+    }
+
     private JPanel createResultPanel() {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createTitledBorder("操作日志"));
@@ -1333,6 +1501,7 @@ public class DumuSwingApp extends JFrame {
         resultArea.append("[" + timestamp + "] " + text + "\n");
         resultArea.setCaretPosition(resultArea.getDocument().getLength());
     }
+
     // 查询人员
     private void searchUsers() {
         if (client == null) {
